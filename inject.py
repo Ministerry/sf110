@@ -5854,4 +5854,29 @@ class BugInject:
         if not target_method_node:
             print("未找到目标方法节点或解析失败。")
             return None
-        return BugInject.nullinject(target_method_node) + BugInject.Indexinject(target_method_node) +  BugInject.resouceinject(target_method_node) + BugInject.concurrentinject(target_method_node) + BugInject.incorrectinject(target_method_node) + BugInject.logicinject(target_method_node) + BugInject.numericinject(target_method_node) + BugInject.datainject(target_method_node)  + BugInject.stringinject(target_method_node) + BugInject.returninject(target_method_node)
+        
+        all_bugs = BugInject.nullinject(target_method_node) + \
+                   BugInject.Indexinject(target_method_node) + \
+                   BugInject.resouceinject(target_method_node) + \
+                   BugInject.concurrentinject(target_method_node) + \
+                   BugInject.incorrectinject(target_method_node) + \
+                   BugInject.logicinject(target_method_node) + \
+                   BugInject.numericinject(target_method_node) + \
+                   BugInject.datainject(target_method_node) + \
+                   BugInject.stringinject(target_method_node) + \
+                   BugInject.returninject(target_method_node)
+                   
+        # 去重逻辑：基于 'code' 字段和 'bug_type' 去重
+        unique_bugs = []
+        seen_codes = set()
+        
+        for bug in all_bugs:
+            # 使用 (code, bug_type) 元组作为唯一标识，也可以仅用 code
+            # 这里为了保险，防止不同类型但代码碰巧相同的误判（虽然极少），采用了简单去重
+            # 实际上仅仅去重 code 应该就足够了，因为如果 code 一样，行为就一样
+            code_content = bug.get('code', '').strip()
+            if code_content and code_content not in seen_codes:
+                seen_codes.add(code_content)
+                unique_bugs.append(bug)
+                
+        return unique_bugs

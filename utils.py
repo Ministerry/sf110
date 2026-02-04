@@ -2,7 +2,7 @@ import re
 from inject import BugInject
 import javalang
 from javalang.tree import MethodDeclaration, TryStatement, CatchClause, MethodInvocation
-from typing import List, Dict, Any,Optional,Set
+from typing import List, Dict, Any, Optional, Set, Tuple
 import os
 import html
 import pandas as pd
@@ -19,9 +19,9 @@ public class Test {{
     {code}
 }}
 """
-CMD_TIMEOUT = 1000  # 外部命令超时时间（秒）
+CMD_TIMEOUT = 60  # 外部命令超时时间（秒）
 
-def find_matching_brace_smart(text: str, start_pos: int) -> int | None:
+def find_matching_brace_smart(text: str, start_pos: int) -> Optional[int]:
     """
     智能的括号匹配器，会跳过注释和字符串中的大括号。
     返回匹配的右大括号 '}' 后面的索引位置 (即替换应该结束的位置)。
@@ -133,55 +133,71 @@ def is_path_based_variant_ast(original_code: str, variant_code: str, path_info: 
         if not line:
             return ''
         s = line.strip()
-        s = re.sub(r'^[\{\}]+|[\{\}]+$', '', s).strip()
-        s = s.rstrip(';').strip()
+        # 0. Strip comments to handle javalang unparse dropping them
+        s = re.sub(r'//.*$', '', s)
+        s = re.sub(r'/\*.*?\*/', '', s, flags=re.DOTALL)
+        
+        # 1. basic cleanup of block markers: remove ALL braces to handle line splitting/joining robustly
+        s = s.replace('{', ' ').replace('}', ' ')
+        s = s.strip().rstrip(';').strip()
+        
+        # 1.5. Normalize punctuation spacing: add spaces around logical/math operators and commas
+        # This handles 'a=b' vs 'a = b' and 'f(a,b)' vs 'f(a, b)' caused by unparser differences
+        s = re.sub(r'([,.+\-*/%=<>!&|^])', r' \1 ', s)
+
+        # 2. normalize whitespace and parens spacing to standard form first
         s = re.sub(r'\s+', ' ', s).strip().lower()
-        s = re.sub(r'\(\s*', '(', s)
-        s = re.sub(r'\s*\)', ')', s)
-        # remove surrounding parentheses repeatedly
-        while s.startswith('(') and s.endswith(')'):
-            inner = s[1:-1].strip()
-            if inner:
-                s = inner
-            else:
-                break
+        # Collapse multiple parens spaces: "(  (" -> "((", ")  )" -> "))"
+        s = re.sub(r'\(\s+', '(', s)
+        s = re.sub(r'\s+\)', ')', s)
+        
+        # 3. Recursively remove outer parentheses: ((exp)) -> exp
+        # loop until stable to handle multiple layers
+        while True:
+            # Special check: prevent stripping (a) + (b) -> a) + (b which is invalid
+            # Only strip if it matches pairs (this is a heuristic, counting balance is better but expensive)
+            if s.startswith('(') and s.endswith(')'):
+                # Simple check: if we strip, is the inside balanced?
+                inner = s[1:-1].strip()
+                # quick balance check on inner
+                balance = 0
+                possible = True
+                for char in inner:
+                    if char == '(': balance += 1
+                    elif char == ')':
+                        balance -= 1
+                        if balance < 0: # broken structure like "a) + (b"
+                            possible = False
+                            break
+                if possible and balance == 0:
+                    s = inner
+                    continue
+            break
+
+        # 4. Handle control flow keywords
         # remove common leading type declarations (e.g. "boolean x = ...")
         s = re.sub(r'^(?:byte|short|int|long|float|double|boolean|char|string|[A-Z][A-Za-z0-9_$.<>]*)\s+', '', s, flags=re.I)
-        # normalize if-condition with return statement to just the condition and return
+        
+        # normalize if-condition with return statement
         m = re.match(r'^(?:else\s+if|if)\s*\((.*)\)\s*return\s+(.+?);?$', s, flags=re.I)
         if m:
             cond = m.group(1).strip()
             ret = m.group(2).strip()
-            cond = re.sub(r'\s+', ' ', cond).lower()
-            ret = re.sub(r'\s+', ' ', ret).lower()
-            # strip outer parens again
-            while cond.startswith('(') and cond.endswith(')'):
-                inner = cond[1:-1].strip()
-                if inner:
-                    cond = inner
-                else:
-                    break
-            # return condition and return statement
-            return cond + " return " + ret
-        # normalize if-condition to just the condition
+            # recurse normalization on parts would be ideal, but here simple strip
+            return norm_line(cond) + " return " + norm_line(ret)
+            
+        # normalize if-condition
         m = re.match(r'^(?:else\s+if|if)\s*\((.*)\)\s*$', s, flags=re.I)
         if m:
-            cond = m.group(1).strip()
-            cond = re.sub(r'\s+', ' ', cond).lower()
-            # strip outer parens again
-            while cond.startswith('(') and cond.endswith(')'):
-                inner = cond[1:-1].strip()
-                if inner:
-                    cond = inner
-                else:
-                    break
-            return cond
-        # final cleanup: strip any remaining outer parentheses/spaces
-        s = s.strip()
-        s = re.sub(r'^[\(\s]+|[\)\s]+$', '', s)
+            # Just extract condition and continue normalization
+            s = m.group(1).strip()
+            # Restart normalization for the extracted condition (to strip outer parens of condition)
+            return norm_line(s)
 
-        # New: remove all parentheses to avoid mismatches due to grouping
-        s = s.replace('(', '').replace(')', '')
+        # 5. Final fallback: remove all parentheses to allow "fuzzy" matching
+        # This handles javalang's (exp) + (exp) vs exp + exp differences
+        s = s.replace('(', ' ').replace(')', ' ')
+        s = re.sub(r'\s+', ' ', s).strip()
 
         return s
 
@@ -190,6 +206,35 @@ def is_path_based_variant_ast(original_code: str, variant_code: str, path_info: 
 
     removed = set(orig_lines) - set(var_lines)
     added = set(var_lines) - set(orig_lines)
+
+    # Robustness Fix: Filter out changes that are merely due to reformatting (line splitting/joining)
+    # Check if a "removed" line actually exists in the full variant text
+    var_full_text = " " + " ".join(var_lines) + " " # Padding for safety
+    real_removed = set()
+    for r in removed:
+        if not r: continue
+        # Robust check: allow flexible spacing matching for checking existence
+        # because "join" adds single space, but original might have had none or different.
+        # So we normalize spaces in both for this containment check.
+        r_ns = r.replace(" ", "")
+        var_full_ns = var_full_text.replace(" ", "")
+        
+        if r_ns not in var_full_ns:
+            real_removed.add(r)
+    removed = real_removed
+
+    # Check if an "added" line actually exists in the full original text
+    orig_full_text = " " + " ".join(orig_lines) + " "
+    real_added = set()
+    for a in added:
+        if not a: continue
+        # Robust check: allow flexible spacing matching for checking existence
+        a_ns = a.replace(" ", "")
+        orig_full_ns = orig_full_text.replace(" ", "")
+        if a_ns not in orig_full_ns:
+            real_added.add(a)
+    added = real_added
+
     
     # build normalized path element list (flatten path_info)
     path_elems = []
@@ -211,24 +256,20 @@ def is_path_based_variant_ast(original_code: str, variant_code: str, path_info: 
         return False
 
     path_set = set(path_elems)
+    
+    # print(f"DEBUG: path_set={path_set}")
 
     # 检查执行路径中的元素是否与变异的代码有某种关联
     # 如果执行路径中的元素在原始代码中存在，但在变异后被修改了，则认为匹配
     for path_elem in path_set:
-        # 检查路径元素是否与原始代码中的某些行相似（但不是完全相同）
-        for orig_line in orig_lines:
-            # 检查是否是相似的条件语句（比如运算符不同但结构相似）
-            if is_similar_condition(path_elem, orig_line) and (path_elem in added or orig_line in removed):
-                return True
+        if path_elem in removed:
+            return True
         
-        # 检查路径元素是否与变异代码中的新增行匹配
-        if path_elem in added:
-            return True
+        for r in removed:
+            if len(r) < 4: continue
+            if r in path_elem or path_elem in r:
+                return True
 
-    # Strict rule: only accept if any removed line appears exactly in path_set
-    for r in removed:
-        if r in path_set:
-            return True
     return False
 def is_similar_condition(cond1: str, cond2: str) -> bool:
     """
@@ -1152,7 +1193,7 @@ def replace_from_first_brace(file_path, new_code, file_name):
         回退到原有的第一个真正的 '{' 行为仅在未找到时使用。
         """
         # helper: find matching paren, skipping strings/comments
-        def find_matching_paren(text: str, open_pos: int) -> int | None:
+        def find_matching_paren(text: str, open_pos: int) -> Optional[int]:
             i = open_pos
             depth = 0
             L = len(text)
@@ -1378,16 +1419,16 @@ def get_jacoco_path(source_file_path, class_name, report_type="html"):
     
     # 构建报告路径
     class_path = class_name.replace('.', '/')
-    print(class_path)
+    # print(class_path)
     if report_type == "html":
         report_path = project_root / "report" / "jacoco-report" / f"{class_path}.java.html"
     elif report_type == "xml":
         report_path = project_root / "report" / "jacoco-report" / f"{class_path}.xml"
     else:
         raise ValueError(f"不支持的报告类型: {report_type}")
-    print(report_path)
+    # print(report_path)
     return str(report_path)
-def find_next_open_brace_smart(text: str, start_pos: int) -> int | None:
+def find_next_open_brace_smart(text: str, start_pos: int) -> Optional[int]:
     """
     从 start_pos 起，跳过字符串/注释，找到第一个真实的 '{' 的索引。
     """
@@ -1458,7 +1499,16 @@ def get_execution_paths(focal_method, html_path):
     try:
         # 1) AST 获取方法名与参数类型
         tree = javalang.parse.parse(java_template.format(code=focal_method))
-        mnode = tree.types[0].methods[0]
+        mnode = None
+        if tree.types and tree.types[0].methods:
+            mnode = tree.types[0].methods[0]
+        elif tree.types and tree.types[0].constructors:
+            mnode = tree.types[0].constructors[0]
+        
+        if not mnode:
+            print("[WARN] 无法从 AST 解析出方法或构造函数节点")
+            return []
+
         mname = mnode.name
         param_cnt = len(mnode.parameters)
         param_types = []
@@ -1466,6 +1516,7 @@ def get_execution_paths(focal_method, html_path):
             tname = getattr(p.type, "name", str(p.type))
             param_types.append(tname.split(".")[-1])
     except Exception as e:
+        print(f"[WARN] AST解析失败: {e}")
         return []
     try:
         # 2) 使用 BeautifulSoup 读取并解析 HTML
@@ -1542,9 +1593,7 @@ def get_execution_paths(focal_method, html_path):
                     # 检查是否匹配方法签名
                     sig_pattern = re.compile(
                         r'(?:static\s+)?(?:public\s+)?(?:private\s+)?(?:protected\s+)?(?:final\s+)?'
-                        r'(?:String|void|double|boolean|long|float|char|byte|short|int|'
-                        r'List|Vector|Map|Set|Collection|Object|[A-Z][A-Za-z0-9_$.<>]*)'
-                        r'(?:\s*\[\s*\])?\s+'  # 添加对数组类型的支持
+                        r'(?:[\w<>\[\],\.\s]*?)\s+'
                         r'\b' + re.escape(mname) + r'\s*\(',
                         re.IGNORECASE | re.DOTALL
                     )
@@ -1572,9 +1621,7 @@ def get_execution_paths(focal_method, html_path):
                     
                     sig_pattern = re.compile(
                         r'(?:static\s+)?(?:public\s+)?(?:private\s+)?(?:protected\s+)?(?:final\s+)?'
-                        r'(?:String|void|double|boolean|long|float|char|byte|short|int|'
-                        r'List|Vector|Map|Set|Collection|Object|[A-Z][A-Za-z0-9_$.<>]*)'
-                        r'(?:\s*\[\s*\])?\s+'  # 添加对数组类型的支持
+                        r'(?:[\w<>\[\],\.\s]*?)\s+'
                         r'\b' + re.escape(mname) + r'\s*\(',
                         re.IGNORECASE | re.DOTALL
                     )
@@ -1603,9 +1650,7 @@ def get_execution_paths(focal_method, html_path):
                 
                 sig_pattern = re.compile(
                     r'(?:static\s+)?(?:public\s+)?(?:private\s+)?(?:protected\s+)?(?:final\s+)?'
-                    r'(?:String|void|double|boolean|long|float|char|byte|short|int|'
-                    r'List|Vector|Map|Set|Collection|Object|[A-Z][A-Za-z0-9_$.<>]*)'
-                    r'(?:\s*\[\s*\])?\s+'  # 添加对数组类型的支持
+                    r'(?:[\w<>\[\],\.\s]*?)\s+'
                     r'\b' + re.escape(mname) + r'\s*\(',
                     re.IGNORECASE | re.DOTALL
                 )
@@ -1666,8 +1711,24 @@ def get_execution_paths(focal_method, html_path):
                 type_part = type_part.replace('...', '')
                 # 去掉数组符号
                 type_part = re.sub(r'\[\s*\]', '', type_part)
-                # 去掉方法类型参数和泛型实参
-                type_part = re.sub(r'<.*?>', '', type_part)
+                # 去掉方法类型参数和泛型实参 (Handle nested generics)
+                while '<' in type_part:
+                    start_idx = type_part.find('<')
+                    balance = 0
+                    end_idx = -1
+                    for k in range(start_idx, len(type_part)):
+                        if type_part[k] == '<':
+                            balance += 1
+                        elif type_part[k] == '>':
+                            balance -= 1
+                        if balance == 0:
+                            end_idx = k
+                            break
+                    if end_idx != -1:
+                        type_part = type_part[:start_idx] + type_part[end_idx+1:]
+                    else:
+                        break # Unbalanced
+                        
                 # 取最后的简单类名（按 . 分割）
                 simple = type_part.split('.')[-1].strip()
                 # 如果还是空则跳过
@@ -1685,11 +1746,12 @@ def get_execution_paths(focal_method, html_path):
             search_offset += len(src_lines[i]) + 1
         
         # 修复正则表达式，更准确地匹配方法签名，包括throws子句
+        # 使用更灵活的返回类型匹配，支持复杂的泛型（如 Map<A, B>）和构造函数（无返回类型）
         sig_re = re.compile(
             r'(?:static\s+)?(?:public\s+)?(?:private\s+)?(?:protected\s+)?(?:final\s+)?'
-            r'(?:String|void|double|boolean|long|float|char|byte|short|int|'
-            r'List|Vector|Map|Set|Collection|Object|[A-Z][A-Za-z0-9_$.<>]*)'
-            r'(?:\s*\[\s*\])?\s+'  # 添加对数组类型的支持
+            # 匹配返回类型部分：可以是任意类名、基本类型、泛型结构、数组，允许空格和逗号
+            # 非贪婪匹配，直到遇到方法名后的 (
+            r'(?:[\w<>\[\],\.\s]*?)\s+'
             r'\b' + re.escape(mname) + r'\s*\(\s*([^)]*?)\s*\)\s*(?:throws\s+[^{;]*)?[{;]',
             re.DOTALL | re.IGNORECASE
         )
@@ -1800,7 +1862,7 @@ def get_execution_paths(focal_method, html_path):
         print(f"[ERROR] 处理异常: {e}")
         traceback.print_exc()
         return []
-def find_and_replace_method_ast(content: str, class_name: str, method_name: str, new_code: str) -> tuple[str | None, str | None]:
+def find_and_replace_method_ast(content: str, class_name: str, method_name: str, new_code: str) -> Tuple[Optional[str], Optional[str]]:
     """
     更稳健的 AST 定位 + 文本回退方法替换。
     成功返回 (modified_content, original_method_code)，失败返回 (None, None)。
@@ -2150,8 +2212,13 @@ def find_and_replace_method_ast(content: str, class_name: str, method_name: str,
         # 保存原始方法（包含注解/Javadoc）
         original_method_code = content[method_start:method_end]
 
-        # 替换起始位置（从修饰符开始，不包括注解部分以保留注解）
-        replace_start = tentative_start
+        # 检查 new_code 是否包含注解或 Javadoc，如果是，则从 method_start (包括注解) 开始替换
+        # 否则从 tentative_start (仅方法修饰符开始) 替换，以保留原有的注解/Javadoc
+        new_code_stripped = new_code.lstrip()
+        if new_code_stripped.startswith(('@', '/**', '/*')):
+             replace_start = method_start
+        else:
+             replace_start = tentative_start
 
         # 准备新代码并替换
         new_code_clean = new_code.strip()
@@ -2299,7 +2366,7 @@ def run_evo_suite_with_timeout(cmd, cwd=None, timeout=CMD_TIMEOUT):
             proc.kill()
         print(f"[ERROR] EvoSuite执行异常: {str(e)}")
         return False
-def _extract_first_assert(s: str) -> str | None:
+def _extract_first_assert(s: str) -> Optional[str]:
     # 从后往前扫描，按括号计数提取最后一个 assert 语句
     matches = list(re.finditer(r'(assertTrue|assert|assertEquals|assertNotNull|assertFalse|assertSame|assertNotSame)\s*\(', s))
     if not matches:
@@ -2364,3 +2431,51 @@ def strip_java_guard(s: str) -> str:
             last += ';'
         return last
     return s
+def is_relevant_to_prefix(bug_type: str, prefix: str, assertion: str) -> bool:
+    """
+    根据测试前缀(prefix)和断言(assertion)筛选变异体。
+    这是一个启发式筛选，旨在过滤掉与当前测试场景明显不相关的变异类型。
+    
+    Args:
+        bug_type: 植入的Bug类型 (如 "Null Reference Failures")
+        prefix: 测试前缀代码
+        assertion: 测试断言 (如 "exception" 或具体 assert 语句)
+        
+    Returns:
+        bool: True 表示该变异体与测试相关，应该保留; False 表示应该丢弃
+    """
+    if not prefix:
+        return True
+        
+    prefix_lower = prefix.lower()
+    
+    # 1. 异常测试场景：如果测试本身就是为了捕获异常，那么大多数变异都是相关的
+    # 尤其是那些抛出异常或改变异常处理流程的变异
+    if assertion == 'exception' or "catch" in prefix_lower or "expect" in prefix_lower:
+        return True
+
+    # 2. 针对特定 Bug 类型的启发式规则
+    
+    # Index Boundary Failures: 只有当测试涉及数组、集合索引操作时才有意义
+    if "Index Boundary" in bug_type:
+        keywords = ["array", "list", "map", "set", "[", "get(", "size", "length", "add(", "remove("]
+        if not any(k in prefix_lower for k in keywords):
+            # 如果测试代码完全没有集合操作特征，丢弃边界类 bug
+            return False
+            
+    # String Processing Failures: 需要测试包含字符串操作
+    if "String Processing" in bug_type:
+        keywords = ["string", "subs", "index", "append", "format", "\"", "concat", "replace", "char"]
+        if not any(k in prefix_lower for k in keywords):
+            return False
+            
+    # Null Reference Failures: 通常只要有对象操作就相关，很难完全排除
+    # 但如果测试全是基本类型计算 (int, boolean)，可能就不太相关
+    if "Null Reference" in bug_type:
+        # 如果没有任何 new 对象或 null 关键字，且看起来像纯数学计算
+        if "new " not in prefix_lower and "null" not in prefix_lower:
+            # 检查是否只有基本类型
+            # 这是一个弱检测，避免误杀
+            pass
+            
+    return True

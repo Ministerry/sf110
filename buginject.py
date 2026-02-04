@@ -40,22 +40,23 @@ if __name__ == '__main__':
     print(len(items))
     data = items
     result = []
-    for i in range(0,4000):
+    for i in range(18000,21751):
         print(f"Processing item {i+1}/{len(data)}")
-        if i % 1000 == 0:
-            with open('bug_inject_test_1.json', 'w', encoding='utf-8') as f:
+        id = data[i].get('id', 0)
+        if i % 100 == 0:
+            with open('bug_inject_test_7.json', 'w', encoding='utf-8') as f:
                 json.dump(result, f, ensure_ascii=False, indent=2)
-        bug_varies = {
-            "Null Reference Failures" : 0,
-            "Incorrect Behavior Failures" : 0,
-            "Index Boundary Failures" : 0,
-            "Resource Management Failures" : 0,
-            "Concurrent Modification Failures" : 0,
-            "Logic Assertion Failures" : 0,
-            "Data Integrity Failures" : 0,
-            "Numeric Computation Failures" : 0,
-            "String Processing Failures" : 0,
-        }
+        # bug_varies = {
+        #     "Null Reference Failures" : 0,
+        #     "Incorrect Behavior Failures" : 0,
+        #     "Index Boundary Failures" : 0,
+        #     "Resource Management Failures" : 0,
+        #     "Concurrent Modification Failures" : 0,
+        #     "Logic Assertion Failures" : 0,
+        #     "Data Integrity Failures" : 0,
+        #     "Numeric Computation Failures" : 0,
+        #     "String Processing Failures" : 0,
+        # }
         temp_dir = None
         try:
             focal_method = data[i].get('focal_method', 0)
@@ -73,6 +74,7 @@ if __name__ == '__main__':
             dir_name = f"{bug_num}_{project}"
             src_project_path = os.path.join(CWD, dir_name)
             temp_dir = tempfile.mkdtemp(prefix=f"reward_{bug_num}_{project}_")
+            project_path = os.path.join(temp_dir, dir_name)
             # hardlink 
             subprocess.run(['cp', '-al', src_project_path, project_path], check=True, stderr=subprocess.DEVNULL)
         
@@ -98,10 +100,13 @@ if __name__ == '__main__':
                     with open(fpath, 'w', encoding='utf-8') as f:
                         f.write(content_tmp)
 
-            test_code = focal_prefix
+            # [关键路径决策] 
+            # 使用 prefix + assertion 来构造最小化的测试执行环境
+            # 而不是使用 focal_prefix (其中可能包含多个无关断言)
+            # 这确保了捕获的 path 是精准对应于当前“待学习”的 assertion 的
+            test_code = "public void test0()  throws Throwable {\n" + prefix + "\n" + assertion + "\n}"
             if assertion == "exception":
                 continue
-                test_code = f"@Test(timeout = 4000)\npublic void test{id}()  throws Throwable  " + "{\n" + "\ntry{\n" + prefix + "} catch (Throwable t) {\n\n}\n}"
             replace_from_first_brace(temp_test_method_path, test_code, f"{bug_num}_{project}")
             test_ret = run_cmd_with_timeout(
                 ['bash', 'compile.sh'],
@@ -160,7 +165,7 @@ if __name__ == '__main__':
             if temp_dir and os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
-    with open('bug_inject_test_1.json', 'w', encoding='utf-8') as f:
+    with open('bug_inject_test_7.json', 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
 
 
