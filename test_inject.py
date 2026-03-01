@@ -19,7 +19,7 @@ public class TestClass {
         for (SupportingDocument currentSupportingDocument : supportingDocuments) {
             int currentIdentifier
                 = currentSupportingDocument.getIdentifier();
-            if (targetIdentifier == currentIdentifier) {
+            if (targetIdentifier != currentIdentifier) {
                 return true;
             }
         }

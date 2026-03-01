@@ -1,5 +1,5 @@
 #!/bin/bash
-export JAVA_HOME=/home/ubuntu/.conda/envs/rmy_llama/lib/jvm
+export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
 RUNNER_JAR="/home/ubuntu/myren/SF110/lib/evosuite.jar"
 JUNIT4_JAR=/home/ubuntu/myren/SF110/lib/junit-4.13.2.jar
 HAMCREST_JAR=/home/ubuntu/myren/SF110/lib/hamcrest-core-1.3.jar

@@ -50,5 +50,10 @@ for i in range(len(result)):
     sum += len(result[i]['ast_generates'])
 print(sum)
 
-with open('assembled.json', 'w', encoding='utf-8') as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
+with open('assembled_1.json', 'w', encoding='utf-8') as f:
+    json.dump(result, f, ensure_ascii=False, indent=2)
+
+with open('assembled.json','r',encoding='utf-8') as f: 
+    data = json.load(f)
+
+print(len(data))

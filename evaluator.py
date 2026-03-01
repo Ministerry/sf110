@@ -15,19 +15,20 @@ import json
 from typing import Optional
 from utils import *
 
+# 1. 结合好items和generation 
+CWD = "/home/ubuntu/myren/SF110"
+path = "/home/ubuntu/myren/SF110"
+items_path = "/home/ubuntu/myren/SF110/qwen_test.json"      # 替换为easyR1的数据集path     #替换为模型生成的path
+COMPILE_TIMEOUT = 60 
+RUN_TIMEOUT = 20
 reward_assignment = {
     "kill_mutation" : 5,
     "manslaughter" : -5,
-    "wake" : -3,
-    "too_strong_or_error" : -4,
     "varies" : 1,
     "have_connection" : 2,
     "no_connection" : -2,
-    "no_meaning" : -2,
-    "compile_error" : -10,
-    "test_error" : -10
+    "no_meaning" : -5,
 }
-
 def _has_connection(assertion: str, focal_method: str, test_prefix: str = "") -> bool:
     """
     判断断言与目标方法是否存在联系性 (+2 / -2 策略)
@@ -110,9 +111,15 @@ def _is_trivial(assert_str: str) -> bool:
         r'assertTrue\s*\(\s*true\s*\)', 
         r'assertFalse\s*\(\s*false\s*\)', 
         r'assertNull\s*\(\s*null\s*\)',
+        # [新增] 针对 new 出来的对象做非空检查，通常是无意义的
+        r'assertNotNull\s*\(\s*new\s+',
+        # [新增] 针对字符串字面量做非空检查
+        r'assertNotNull\s*\(\s*".*"\s*\)',
         # 匹配简单的自比较: assertEquals(x, x), assertEquals(1, 1)
         # 使用 [\w\d\.] 限制捕获组内容，避免匹配复杂表达式导致误判
-        r'assertEquals\s*\(\s*([\w\d\.]+)\s*,\s*\1\s*\)'
+        r'assertEquals\s*\(\s*([\w\d\.]+)\s*,\s*\1\s*\)',
+        r'assertSame\s*\(\s*([\w\d\.]+)\s*,\s*\1\s*\)',
+        r'assertNotSame\s*\(\s*([\w\d\.]+)\s*,\s*\1\s*\)'
     ]
     return any(re.search(p, assert_str) for p in trivial_patterns)
 
@@ -128,7 +135,7 @@ def reward_function(focal_method_output='FAIL', variant_output='FAIL', num_varia
     r_raw = 0
     
     # 理论最小值定义
-    r_min_val = num_variants * (-3) - 3
+    r_min_val = num_variants * (-5) - 7
 
     # A. 断言导致编译失败或 focal_method_output == FAIL
     if focal_method_output == "FAIL":
@@ -159,7 +166,7 @@ def normalization(reward,n,focal_method,test_prefix,assertion,num):
     # --- 3. 归一化计算 (Normalization) ---
     # n 代表变体数量
     R_max = n * 6 + 2
-    R_min = n * (-3) - 4
+    R_min = n * (-5) - 7
     
     # 限制 r_raw 不超出理论边界
     reward = max(R_min, min(R_max, reward))
@@ -172,14 +179,84 @@ def normalization(reward,n,focal_method,test_prefix,assertion,num):
     
     return r_final
 
-# 1. 结合好items和generation 
-CWD = "/home/ubuntu/myren/SF110"
-path = "/home/ubuntu/myren/SF110"
-items_path = "/home/ubuntu/myren/SF110/qwen_train.json"      # 替换为easyR1的数据集path     #替换为模型生成的path
+def optimized_compile(cwd, source_files, timeout=COMPILE_TIMEOUT):
+    """
+    直接调用 javac 编译指定文件列表，无需扫描整个项目。
+    如果失败，返回 None (超时/异常)，或 CompletedProcess (含返回码)。
+    """
+    import signal
+    try:
+        # 1. 基础环境配置
+        JAVA_HOME = os.getenv('JAVA_HOME', '/home/ubuntu/.conda/envs/rmy_llama/lib/jvm')
+        JAVAC = os.path.join(JAVA_HOME, 'bin', 'javac')
+        
+        # 2. 构造 Classpath
+        # 包含了 compile.sh 中的所有关键路径
+        LIB_BASE = "/home/ubuntu/myren/SF110/lib"
+        cp_segments = [
+            f"{LIB_BASE}/evosuite.jar",
+            f"{LIB_BASE}/junit-4.13.2.jar",
+            f"{LIB_BASE}/hamcrest-core-1.3.jar",
+            "test-lib/*",  # 项目自身的测试依赖
+            "lib/*",       # 项目自身的依赖
+            "/usr/share/ant/lib/*", # ANT 依赖
+            ".",
+            "target/classes",      # 自身类
+            "target/test-classes"  # 测试类
+        ]
+        classpath = ":".join(cp_segments)
+        
+        # 3. 基础编译参数 (对齐 fast_compile.sh)
+        base_cmd = [JAVAC, "-g:lines", "-nowarn", "-proc:none", "-encoding", "UTF-8", "-cp", classpath]
+        
+        for src_file in source_files:
+            if not src_file: continue
+            
+            # [Fix] 只处理 src/main 和 evosuite-tests，明确跳过 src/test (与 fast_compile.sh 保持一致)
+            if "src/test" in src_file:
+                continue
+
+            dest_dir = "target/classes"
+            if "evosuite-tests" in src_file:
+                dest_dir = "target/test-classes"
+                
+            cmd = base_cmd + ["-d", dest_dir, src_file]
+            
+            # [Fix] 这里的超时处理对齐 run_cmd_with_timeout
+            # 使用 Popen + setsid + killpg 防止僵尸进程
+            try:
+                with subprocess.Popen(
+                    cmd, 
+                    cwd=cwd, 
+                    stdout=subprocess.DEVNULL, 
+                    stderr=subprocess.PIPE, 
+                    text=True,
+                    preexec_fn=os.setsid
+                ) as process:
+                    try:
+                        _, stderr = process.communicate(timeout=timeout)
+                        if process.returncode != 0:
+                            # 编译失败，将 stderr 传回以便上层判断 (比如排查语法错误)
+                            return subprocess.CompletedProcess(cmd, process.returncode, stderr=stderr)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                        except: pass
+                        return None # 超时返回 None，触发 fallback
+            except Exception:
+                return None
+        
+        # 全部成功
+        return subprocess.CompletedProcess(args=[], returncode=0)
+        
+    except Exception as e:
+        print(f"[WARN] 快速编译异常: {e}, 将回退到脚本模式")
+        return None
+
 with open(items_path,"r",encoding="utf-8") as f:
     data = json.load(f)
 generation = []
-with open("qwen3_4b_generated_predictions_before.jsonl","r",encoding="utf-8") as f:
+with open("qwen2.5_1.5_after_generated_predictions.jsonl","r",encoding="utf-8") as f:
     for line in f:
         pred = json.loads(line.strip())
         generation.append(strip_java_guard(pred['predict']))
@@ -252,10 +329,15 @@ for i in range(len(data)):
         # test_code = extra_info.get('focal_prefix', '')
         # 1. 生成断言后对原方法进行测试
         replace_from_first_brace(temp_test_method_path, test_code, f"{bug_num}_{project}")
-        test_ret = run_cmd_with_timeout(
-            ['bash', 'compile.sh'],
-            cwd=project_path
-        )
+        test_ret = optimized_compile(project_path, [relative_path, relatest_path])
+        
+        # 如果极速编译失败 (返回 None 或 returncode != 0)，回退到 fast_compile.sh
+        if test_ret is None or test_ret.returncode != 0:
+            test_ret = run_cmd_with_timeout(
+                ['bash', 'fast_compile.sh'],
+                cwd=project_path,
+                timeout=COMPILE_TIMEOUT
+            )
         if test_ret is None or test_ret.returncode != 0:
             data[i]['reward'] = -1.0
             print("编译失败")
@@ -321,10 +403,15 @@ for i in range(len(data)):
                 continue         
             
             # 6. 运行编译和测试
-            test_ret = run_cmd_with_timeout(
-                ['bash', 'compile.sh'],
-                cwd=project_path
-            )
+            test_ret = optimized_compile(project_path, [relative_path, relatest_path])
+            
+            # 如果极速编译失败 (返回 None 或 returncode != 0)，回退到 fast_compile.sh
+            if test_ret is None or test_ret.returncode != 0:
+                test_ret = run_cmd_with_timeout(
+                    ['bash', 'fast_compile.sh'],
+                    cwd=project_path,
+                    timeout=COMPILE_TIMEOUT
+                )
             if test_ret is None or test_ret.returncode != 0:
                 print("变体编译失败")
                 continue
@@ -377,5 +464,5 @@ for i in range(len(data)):
         data[i]['reward'] = normalization(reward,n,focal_method,prefix,assertion,len(bug_varies))
     
     
-with open("excution_qwen3_4b_before_generated_predictions.json","w",encoding="utf-8") as f:
+with open("excution_qwen2.5_1.5_after_generated_predictions.json","w",encoding="utf-8") as f:
     json.dump(data, f, ensure_ascii=False, indent=2)

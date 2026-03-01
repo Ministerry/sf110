@@ -1,14 +1,17 @@
 import os
 import json
-
+import sys
 improve = 0
 back = 0
 same = 0
 result = []
-with open("excution_qwen3_4b_before_generated_predictions.json","r",encoding="utf-8") as f:
+model = sys.argv[1]
+
+
+with open(f"excution_{model}_before_generated_predictions.json","r",encoding="utf-8") as f:
     data_before = json.load(f)
 
-with open("excution_qwne3_4b_after_generated_predictions.json","r",encoding="utf-8") as f:
+with open(f"excution_{model}_after_generated_predictions.json","r",encoding="utf-8") as f:
     data_after = json.load(f)
 
 for i in range(len(data_before)):

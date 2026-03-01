@@ -913,94 +913,88 @@ def unparse(node, indent_level=0):
 
     if node_type in ('ReferenceType', 'ClassReference', 'QualifiedIdentifier'):
         """
-        Render ReferenceType by walking the nested `sub_type` chain (javalang represents
-        qualified generic types like `java.util.List<String>` as nested ReferenceType nodes).
-        This collects dotted name parts, finds the nearest type-arguments, and sums array dims.
+        Render ReferenceType by walking the nested `sub_type` chain.
+        Now supports full nested generic arguments at each level (e.g. Outer<A>.Inner<B>).
         """
         try:
-            # walk chain to collect name parts and locate type-arguments on the deepest node that has them
             parts = []
-            args_node = None
-            dim_count = 0
             cur = node
             visited = set()
+            
+            # We must traverse from the outermost type down to the innermost (leaf).
+            # Javalang structure: leaf.sub_type -> parent -> ... -> None
+            # But wait, javalang structure is usually:
+            #   Outer<A>.Inner<B>  =>  ReferenceType(name='Inner', sub_type=ReferenceType(name='Outer', ...))
+            # So 'node' is the LEAF (Inner). We need to reverse the chain to print Outer first.
+            
+            chain = []
             while cur is not None:
-                # avoid infinite loops
-                cid = id(cur)
-                if cid in visited:
-                    break
-                visited.add(cid)
-
-                nm = getattr(cur, 'name', None) or getattr(cur, 'identifier', None)
-                if isinstance(nm, str):
-                    parts.append(nm)
-                elif nm is not None:
-                    try:
-                        parts.append(unparse(nm))
-                    except Exception:
-                        parts.append(str(nm))
-
-                # prefer the deepest (closest-to-leaf) arguments we encounter
-                raw_args = getattr(cur, 'arguments', None) or getattr(cur, 'type_arguments', None) or getattr(cur, 'typeArguments', None)
-                if raw_args:
-                    args_node = raw_args
-
-                # accumulate any dimensions seen on nodes in the chain
-                dims = getattr(cur, 'dimensions', None)
-                if isinstance(dims, (list, tuple)):
-                    dim_count += len(dims)
-                elif dims:
-                    dim_count += 1
-
+                if id(cur) in visited: break
+                visited.add(id(cur))
+                chain.append(cur)
                 cur = getattr(cur, 'sub_type', None)
-
-            # join dotted name
-            full_name = ".".join(p for p in parts if p)
-
-            # render type-arguments if present (TypeArgument nodes commonly wrap `.type`)
-            args_s = ""
-            try:
-                if args_node:
-                    args_iter = args_node if isinstance(args_node, (list, tuple)) else [args_node]
-                    arg_parts = []
-                    for a in args_iter:
-                        if a is None:
-                            continue
-                        # get explicit wildcard bound info and inner type/argument if any
-                        pat = getattr(a, 'pattern_type', None) or getattr(a, 'pattern', None)
-                        atype = getattr(a, 'type', None) or getattr(a, 'argument', None)
-
-                        # explicit wildcard with no bound: "?"
-                        if getattr(a, 'type', None) is None and getattr(a, 'argument', None) is None and pat is None:
-                            arg_parts.append('?')
-                            continue
-
-                        # wildcard with bound: "? extends Foo" / "? super Bar"
-                        if pat:
-                            if atype is not None:
-                                arg_parts.append('? ' + str(pat) + ' ' + unparse(atype))
-                            else:
-                                arg_parts.append('?')
-                            continue
-
-                        # normal type argument: render the inner type directly
-                        if atype is not None:
-                            arg_parts.append(unparse(atype))
-                        else:
-                            # fallback: unparse the node itself
-                            try:
-                                arg_parts.append(unparse(a))
-                            except Exception:
-                                arg_parts.append(str(a))
-
-                    if arg_parts:
-                        args_s = "<" + ", ".join(arg_parts) + ">"
-            except Exception:
+            
+            # Reverse chain to start from Outer
+            chain.reverse()
+            
+            output_parts = []
+            total_dims = 0
+            
+            for i, part_node in enumerate(chain):
+                # 1. Name
+                nm = getattr(part_node, 'name', None) or getattr(part_node, 'identifier', None)
+                if nm is None:
+                    name_s = ""
+                else:
+                    try:
+                        name_s = unparse(nm)
+                    except:
+                        name_s = str(nm)
+                
+                # 2. Type Arguments (Generics) for THIS part
                 args_s = ""
+                raw_args = getattr(part_node, 'arguments', None) or getattr(part_node, 'type_arguments', None) or getattr(part_node, 'typeArguments', None)
+                if raw_args:
+                    try:
+                        args_iter = raw_args if isinstance(raw_args, (list, tuple)) else [raw_args]
+                        arg_strs = []
+                        for a in args_iter:
+                            if a is None: continue
+                            # check wildcard pattern
+                            pat = getattr(a, 'pattern_type', None) or getattr(a, 'pattern', None)
+                            atype = getattr(a, 'type', None) or getattr(a, 'argument', None)
+                            
+                            if pat:
+                                if atype:
+                                    arg_strs.append(f"? {pat} {unparse(atype)}")
+                                else:
+                                    arg_strs.append(f"? {pat}") # Should be "? extends/super" without type? Rare.
+                            elif atype:
+                                arg_strs.append(unparse(atype))
+                            elif getattr(a, 'type', None) is None and getattr(a, 'argument', None) is None and pat is None:
+                                # Pure wildcard '?'
+                                arg_strs.append('?')
+                            else:
+                                # Fallback
+                                arg_strs.append(unparse(a))
+                                
+                        if arg_strs:
+                            args_s = "<" + ", ".join(arg_strs) + ">"
+                    except:
+                        pass
+                
+                output_parts.append(name_s + args_s)
+                
+                # 3. Accumulate dimensions (arrays usually appear on the leaf, but let's sum them all)
+                dims = getattr(part_node, 'dimensions', None)
+                if isinstance(dims, (list, tuple)):
+                    total_dims += len(dims)
+                elif dims:
+                    total_dims += 1
 
-            out_name = (full_name or str(node)).strip()
-            out_name = re.sub(r'\s+', ' ', out_name).replace(' .', '.').replace('. ', '.')
-            return out_name + args_s + ("[]" * dim_count)
+            full_name = ".".join(output_parts)
+            return full_name + ("[]" * total_dims)
+
         except Exception:
             try:
                 return str(node)
@@ -1092,7 +1086,7 @@ def unparse(node, indent_level=0):
                             s = getattr(it, 'value', None) or getattr(it, 'symbol', None) or str(it)
                     except Exception:
                         s = None
-                    if s and '!' in str(s):
+                    if s and str(s).strip() == '!':
                         return '!'
             # inspect __dict__ string-like values
             try:
@@ -1100,13 +1094,13 @@ def unparse(node, indent_level=0):
                     try:
                         if vv is None:
                             continue
-                        if isinstance(vv, str) and '!' in vv:
+                        if isinstance(vv, str) and vv.strip() == '!':
                             return '!'
                         if hasattr(vv, 'value') and getattr(vv, 'value', None) == '!':
                             return '!'
                         if hasattr(vv, 'symbol') and getattr(vv, 'symbol', None) == '!':
                             return '!'
-                        if '!' in str(vv):
+                        if str(vv).strip() == '!':
                             return '!'
                     except Exception:
                         continue

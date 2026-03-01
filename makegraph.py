@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import json
 import numpy as np
 import math
-
+import sys
 def load_rewards(path):
     with open(path, "r", encoding="utf-8") as f:
         items = json.load(f)
@@ -14,10 +14,45 @@ def load_rewards(path):
             data.append(-1)
     return data
 
-data_before = load_rewards("excution_generated_predictions_before.json")
-data_after = load_rewards("excution_generated_predictions_after.json")
-qwen4b_data_before = load_rewards("excution_qwen3_4b_before_generated_predictions.json")
-qwen3_4b_data_after = load_rewards("excution_qwne3_4b_after_generated_predictions.json")
+# data_before = load_rewards("excution_qwen2.5_1.5b_before_generated_predictions.json")
+# data_after = load_rewards("excution_qwen2.5_1.5b_after_generated_predictions.json")
+# counts_before, bins = np.histogram(data_before, bins=30)
+# counts_after, _ = np.histogram(data_after, bins=bins)
+# max_count = 0
+# if counts_before.size:
+#     max_count = max(max_count, int(counts_before.max()))
+# if counts_after.size:
+#     max_count = max(max_count, int(counts_after.max()))
+
+# ymax = int(math.ceil(max_count * 1.1)) if max_count > 0 else 1
+
+# # plot before
+# plt.figure()
+# plt.hist(data_before, bins=bins, color='red', edgecolor='black', alpha=0.7)
+# plt.title('qwen2.5_1.5b_before:' + str(len(data_before)))
+# plt.xlabel('Value')
+# plt.ylabel('Frequency')
+# plt.grid(True, linestyle='-', alpha=0.3)
+# plt.ylim(0, ymax)
+# plt.savefig('qwen2.5_1.5b_before.png')
+# plt.close()
+# print("Graph saved to histogram_before.png")
+
+# # plot after
+# plt.figure()
+# plt.hist(data_after, bins=bins, color='lightblue', edgecolor='black', alpha=0.7)
+# plt.title('qwen2.5_1.5b_after:' + str(len(data_after)))
+# plt.xlabel('Value')
+# plt.ylabel('Frequency')
+# plt.grid(True, linestyle='-', alpha=0.3)
+# plt.ylim(0, ymax)
+# plt.savefig('qwen2.5_1.5b_after.png')
+# plt.close()
+# print("Graph saved to histogram_after.png")
+model = sys.argv[1]
+
+data_before = load_rewards(f"excution_{model}_before_generated_predictions.json")
+data_after = load_rewards(f"excution_{model}_after_generated_predictions.json")
 counts_before, bins = np.histogram(data_before, bins=30)
 counts_after, _ = np.histogram(data_after, bins=bins)
 max_count = 0
@@ -30,48 +65,24 @@ ymax = int(math.ceil(max_count * 1.1)) if max_count > 0 else 1
 
 # plot before
 plt.figure()
-plt.hist(data_before, bins=bins, color='red', edgecolor='black', alpha=0.7)
-plt.title('qwen2.5_1.5b_before:' + str(len(data_before)))
+plt.hist(data_before, bins=bins, color='yellow', edgecolor='black', alpha=0.7)
+plt.title(f'{model}_before:' + str(len(data_before)))
 plt.xlabel('Value')
 plt.ylabel('Frequency')
 plt.grid(True, linestyle='-', alpha=0.3)
 plt.ylim(0, ymax)
-plt.savefig('qwen2.5_1.5b_before.png')
+plt.savefig(f'{model}_before.png')
 plt.close()
 print("Graph saved to histogram_before.png")
 
-# plot after
+#plot after
 plt.figure()
 plt.hist(data_after, bins=bins, color='lightblue', edgecolor='black', alpha=0.7)
-plt.title('qwen2.5_1.5b_after:' + str(len(data_after)))
+plt.title(f'{model}_after:' + str(len(data_after)))
 plt.xlabel('Value')
 plt.ylabel('Frequency')
 plt.grid(True, linestyle='-', alpha=0.3)
 plt.ylim(0, ymax)
-plt.savefig('qwen2.5_1.5b_after.png')
-plt.close()
-print("Graph saved to histogram_after.png")
-
-
-# plot before
-plt.figure()
-plt.hist(qwen4b_data_before, bins=bins, color='yellow', edgecolor='black', alpha=0.7)
-plt.title('qwen3_4b_before:' + str(len(qwen4b_data_before)))
-plt.xlabel('Value')
-plt.ylabel('Frequency')
-plt.grid(True, linestyle='-', alpha=0.3)
-plt.ylim(0, ymax)
-plt.savefig('qwen3_4b_before.png')
-plt.close()
-print("Graph saved to histogram_before.png")
-
-plt.figure()
-plt.hist(qwen3_4b_data_after, bins=bins, color='pink', edgecolor='black', alpha=0.7)
-plt.title('qwen3_4b_after:' + str(len(qwen3_4b_data_after)))
-plt.xlabel('Value')
-plt.ylabel('Frequency')
-plt.grid(True, linestyle='-', alpha=0.3)
-plt.ylim(0, ymax)
-plt.savefig('qwen3_4b_after.png')
+plt.savefig(f'{model}_after.png')
 plt.close()
 print("Graph saved to histogram_after.png")

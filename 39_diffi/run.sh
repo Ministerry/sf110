@@ -1,6 +1,6 @@
 set -euo pipefail
 # optional: override JAVA_HOME before calling script
-export JAVA_HOME=/home/ubuntu/.conda/envs/rmy_llama/lib/jvm
+export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
 STANDALONE=/home/ubuntu/myren/SF110/lib/evosuite-standalone-runtime-1.1.0.jar
 EVOJAR=/home/ubuntu/myren/SF110/lib/evosuite.jar
 JUNIT4_JAR=/home/ubuntu/myren/SF110/lib/junit-4.13.2.jar
