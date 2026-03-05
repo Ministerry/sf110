@@ -53,6 +53,7 @@ model = sys.argv[1]
 
 data_before = load_rewards(f"excution_{model}_before_generated_predictions.json")
 data_after = load_rewards(f"excution_{model}_after_generated_predictions.json")
+data_deepseek = load_rewards(f"excution_{model}_deepseek_generated_predictions.json")
 counts_before, bins = np.histogram(data_before, bins=30)
 counts_after, _ = np.histogram(data_after, bins=bins)
 max_count = 0
@@ -84,5 +85,17 @@ plt.ylabel('Frequency')
 plt.grid(True, linestyle='-', alpha=0.3)
 plt.ylim(0, ymax)
 plt.savefig(f'{model}_after.png')
+plt.close()
+print("Graph saved to histogram_after.png")
+
+#plot deepseek
+plt.figure()
+plt.hist(data_deepseek, bins=bins, color='pink', edgecolor='black', alpha=0.7)
+plt.title(f'{model}_deepseek:' + str(len(data_deepseek)))
+plt.xlabel('Value')
+plt.ylabel('Frequency')
+plt.grid(True, linestyle='-', alpha=0.3)
+plt.ylim(0, ymax)
+plt.savefig(f'{model}_deepseek.png')
 plt.close()
 print("Graph saved to histogram_after.png")

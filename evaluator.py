@@ -106,17 +106,17 @@ def _has_connection(assertion: str, focal_method: str, test_prefix: str = "") ->
 def _is_trivial(assert_str: str) -> bool:
     if not assert_str: return True
     # 对应图中“琐碎断言”如 assertTrue(true)
-    # 优化：修复 assertEquals 匹配过于宽泛的问题，增加 assertNull
     trivial_patterns = [
         r'assertTrue\s*\(\s*true\s*\)', 
         r'assertFalse\s*\(\s*false\s*\)', 
         r'assertNull\s*\(\s*null\s*\)',
-        # [新增] 针对 new 出来的对象做非空检查，通常是无意义的
+        # 针对 new 出来的对象做非空检查，通常是无意义的
         r'assertNotNull\s*\(\s*new\s+',
-        # [新增] 针对字符串字面量做非空检查
+        # 针对字符串字面量做非空检查
         r'assertNotNull\s*\(\s*".*"\s*\)',
+        # 注意：这里不再无脑封杀 assertNotNull(变量)，因为有效的 assertNotNull 也会被扼杀。
+        # 取而代之的是，如果它没能杀死任何变异体会受到额外的防作弊惩罚。
         # 匹配简单的自比较: assertEquals(x, x), assertEquals(1, 1)
-        # 使用 [\w\d\.] 限制捕获组内容，避免匹配复杂表达式导致误判
         r'assertEquals\s*\(\s*([\w\d\.]+)\s*,\s*\1\s*\)',
         r'assertSame\s*\(\s*([\w\d\.]+)\s*,\s*\1\s*\)',
         r'assertNotSame\s*\(\s*([\w\d\.]+)\s*,\s*\1\s*\)'
@@ -151,6 +151,12 @@ def reward_function(focal_method_output='FAIL', variant_output='FAIL', num_varia
     return r_raw
 
 def normalization(reward,n,focal_method,test_prefix,assertion,num):
+
+    if num == 0: 
+        if _is_trivial(assertion) or "assertNotNull" in (assertion or ""):
+             return -0.8
+        else:
+             return -0.4
 
     # D. 断言精确性 (与方法本身联系)
     reward += reward_assignment['varies'] * num
@@ -458,8 +464,12 @@ for i in range(len(data)):
                     
     if temp_dir and os.path.exists(temp_dir):
         shutil.rmtree(temp_dir, ignore_errors=True)    
-    if n == 0 and focal_method_output == "PASS":  
-        data[i]['reward'] = 0.1
+    
+    if n == 0:
+        if focal_method_output == "PASS":
+            data[i]['reward'] = -0.5
+        else:
+            data[i]['reward'] = -1.0
     elif n != 0:
         data[i]['reward'] = normalization(reward,n,focal_method,prefix,assertion,len(bug_varies))
     
