@@ -136,20 +136,17 @@ def _has_connection(assertion: str, focal_method: str, test_prefix: str = "") ->
 def _is_trivial(assert_str: str) -> bool:
     if not assert_str: return True
     # 对应图中“琐碎断言”如 assertTrue(true)
-    # 优化：修复 assertEquals 匹配过于宽泛的问题，增加 assertNull
     trivial_patterns = [
         r'assertTrue\s*\(\s*true\s*\)', 
         r'assertFalse\s*\(\s*false\s*\)', 
         r'assertNull\s*\(\s*null\s*\)',
-        # [新增] 针对 new 出来的对象做非空检查，通常是无意义的
+        # 针对 new 出来的对象做非空检查，通常是无意义的
         r'assertNotNull\s*\(\s*new\s+',
-        # [新增] 针对字符串字面量做非空检查
+        # 针对字符串字面量做非空检查
         r'assertNotNull\s*\(\s*".*"\s*\)',
-        # [新增] 针对单纯的变量判空 (如 assertTrue(x != null) 或 assertNotNull(x))，通常被认为是不够精确的“偷懒”断言
-        r'assertTrue\s*\(\s*[\w\d\.]+\s*!=\s*null\s*\)',
-        r'assertNotNull\s*\(\s*[\w\d\.]+\s*\)',
+        # 注意：这里不再无脑封杀 assertNotNull(变量)，因为有效的 assertNotNull 也会被扼杀。
+        # 取而代之的是，如果它没能杀死任何变异体会受到额外的防作弊惩罚。
         # 匹配简单的自比较: assertEquals(x, x), assertEquals(1, 1)
-        # 使用 [\w\d\.] 限制捕获组内容，避免匹配复杂表达式导致误判
         r'assertEquals\s*\(\s*([\w\d\.]+)\s*,\s*\1\s*\)',
         r'assertSame\s*\(\s*([\w\d\.]+)\s*,\s*\1\s*\)',
         r'assertNotSame\s*\(\s*([\w\d\.]+)\s*,\s*\1\s*\)'
@@ -176,6 +173,12 @@ def normalization(reward, n, focal_method, test_prefix, assertion, num):
     """
     将动态变体得分与静态断言质量得分融合，并进行鲁棒归一化。
     """
+    if num == 0: 
+        if _is_trivial(assertion) or "assertNotNull" in (assertion or ""):
+             return -0.8
+        else:
+             return -0.4
+
     static_score = 0.0
 
     static_score += reward_assignment['varies'] * num
@@ -292,16 +295,25 @@ def optimized_compile(cwd, source_files, timeout=COMPILE_TIMEOUT):
 with open(items_path,"r",encoding="utf-8") as f:
     data = json.load(f)
 generation = []
-with open("qwen3_1.7_before_generated_predictions.jsonl","r",encoding="utf-8") as f:
+with open("qwen3_1.7b_3_4_before_generated_predictions.jsonl","r",encoding="utf-8") as f:
     for line in f:
         pred = json.loads(line.strip())
         generation.append(strip_java_guard(pred['predict']))
+
+# with open("result_sf110.json","r",encoding="utf-8") as f:
+#     data_deepseek = json.load(f)
+
 gen_count = 0
 for i in range(len(data)):
     if len(data[i]['ast_generates']) != 0:
         data[i]['predict'] = generation[gen_count]
         gen_count += 1
 
+# gen_count = 0
+# for i in range(len(data)):
+#     if len(data[i]['ast_generates']) != 0:
+#         data[i]['predict'] = data_deepseek[i]['ds_generates'][0]
+#         gen_count += 1
 print(gen_count)
 
 
@@ -468,22 +480,40 @@ for i in range(len(data)):
                 
             # 解析 JUnit 输出
             summary = parse_junit_output(out_text)
-            # 根据解析结果设置 reward：
+            
+            # 使用更细粒度的失败类型解析
+            failure_type = None
             if summary.get("ok") is True:
                 variant_output = "PASS"
-            elif summary.get("ok") is False:
-                variant_output = "FAIL"
-                if bug_type not in bug_varies:
-                    bug_varies.add(bug_type)
             else:
-                if test_ret.returncode != 0:
-                    variant_output = "FAIL"
-                    if bug_type not in bug_varies:
-                        bug_varies.add(bug_type)
+                variant_output = "FAIL"
+                
+                # 判定逻辑优化：
+                # 1. 如果明确看到了 AssertionError 的堆栈信息 -> 逻辑错误 (Logic Kill)
+                # 2. 如果看到了 failures > 0 且 errors == 0 -> 逻辑错误 (通常 JUnit 将断言失败计为 failures)
+                # 3. 其他情况 (errors > 0, 或者看到 Exception) -> 崩溃/异常 (Crash Kill)
+                
+                is_assertion_error = "java.lang.AssertionError" in out_text
+                has_failures = re.search(r'Failures:\s*[1-9]', out_text)
+                has_errors = re.search(r'Errors:\s*[1-9]', out_text)
+                
+                if is_assertion_error:
+                    failure_type = "assertion"
+                elif has_failures and not has_errors:
+                    failure_type = "assertion"
                 else:
-                    variant_output = "PASS"
+                    failure_type = "exception"
+
+                if bug_type not in bug_varies:
+                    # 对于变异测试，只有真正触发变异(导致失败)才是有意义的
+                    bug_varies.add(bug_type)
+
+            # 特殊情况：如果是超时或者 JVM 崩溃，test_ret.returncode != 0 但 junit 可能没解析出来
+            if variant_output == "FAIL" and summary.get("ok") is None:
+                 failure_type = "exception"
+
             n += 1
-            reward += reward_function(focal_method_output,variant_output)
+            reward += reward_function(focal_method_output, variant_output, failure_type)
 
         except Exception as e:
             print(f"[ERROR] 异常: {str(e)}")
@@ -494,8 +524,12 @@ for i in range(len(data)):
                     
     if temp_dir and os.path.exists(temp_dir):
         shutil.rmtree(temp_dir, ignore_errors=True)    
-    if n == 0 and focal_method_output == "PASS":  
-        data[i]['reward'] = 0.1
+    
+    if n == 0:
+        if focal_method_output == "PASS":
+            data[i]['reward'] = -0.5
+        else:
+            data[i]['reward'] = -1.0
     elif n != 0:
         data[i]['reward'] = normalization(reward,n,focal_method,prefix,assertion,len(bug_varies))
     
