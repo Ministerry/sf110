@@ -1,5 +1,5 @@
 import re
-from inject import BugInject
+from examples.reward_function.inject import BugInject
 import javalang
 from javalang.tree import MethodDeclaration, TryStatement, CatchClause, MethodInvocation
 from typing import List, Dict, Any, Optional, Set, Tuple
@@ -2237,7 +2237,6 @@ def find_and_replace_method_ast(content: str, class_name: str, method_name: str,
     except Exception:
         traceback.print_exc()
         return None, None
-    
 def replace_method_in_java_file(main_method_path, extracted_class_name, extracted_method_name, new_code):
     """
     在Java文件中找到指定方法并替换为新代码，同时保存原始代码
@@ -2366,71 +2365,263 @@ def run_evo_suite_with_timeout(cmd, cwd=None, timeout=CMD_TIMEOUT):
             proc.kill()
         print(f"[ERROR] EvoSuite执行异常: {str(e)}")
         return False
+def get_disabled_intervals(text: str):
+    """
+    Returns a list of intervals (start, end) that are within comments or strings.
+    range is [start, end), exclusive of end.
+    """
+    intervals = []
+    in_string = False # "
+    in_char = False # '
+    in_line_comment = False # //
+    in_block_comment = False # /* */
+    
+    start_idx = -1
+    
+    i = 0
+    L = len(text)
+    
+    while i < L:
+        ch = text[i]
+        
+        # Check for state changes
+        if in_line_comment:
+            if ch == '\n':
+                in_line_comment = False
+                intervals.append((start_idx, i))
+                start_idx = -1
+            i += 1
+            continue
+            
+        if in_block_comment:
+            if ch == '*' and i + 1 < L and text[i+1] == '/':
+                in_block_comment = False
+                intervals.append((start_idx, i + 2))
+                start_idx = -1
+                i += 2
+                continue
+            i += 1
+            continue
+            
+        if in_string:
+            if ch == '\\':
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+                intervals.append((start_idx, i + 1))
+                start_idx = -1
+            i += 1
+            continue
+
+        if in_char:
+            if ch == '\\':
+                i += 2
+                continue
+            if ch == '\'':
+                in_char = False
+                intervals.append((start_idx, i + 1))
+                start_idx = -1
+            i += 1
+            continue
+            
+        # Starting new states
+        if ch == '"':
+            in_string = True
+            start_idx = i
+            i += 1
+        elif ch == '\'':
+            in_char = True
+            start_idx = i
+            i += 1
+        elif ch == '/' and i + 1 < L:
+            if text[i+1] == '/':
+                in_line_comment = True
+                start_idx = i
+                i += 2
+            elif text[i+1] == '*':
+                in_block_comment = True
+                start_idx = i
+                i += 2
+            else:
+                i += 1
+        else:
+            i += 1
+            
+    # Close any open intervals at EOF
+    if start_idx != -1:
+        intervals.append((start_idx, L))
+        
+    return intervals
+def find_matching_paren_smart(text: str, open_pos: int) -> Optional[int]:
+    """
+    Find matching ')' for '(' at open_pos, skipping strings and comments.
+    Returns index of char AFTER ')', or None.
+    """
+    i = open_pos + 1
+    depth = 1
+    L = len(text)
+    
+    in_string = False
+    in_char = False
+    in_line_comment = False
+    in_block_comment = False
+    
+    while i < L:
+        ch = text[i]
+        
+        if in_line_comment:
+            if ch == '\n': in_line_comment = False
+            i += 1; continue
+        if in_block_comment:
+            if ch == '*' and i+1 < L and text[i+1] == '/': in_block_comment = False; i+=2; continue
+            i += 1; continue
+        if in_string:
+            if ch == '\\': i+=2; continue
+            if ch == '"': in_string = False
+            i += 1; continue
+        if in_char:
+            if ch == '\\': i+=2; continue
+            if ch == '\'': in_char = False
+            i += 1; continue
+            
+        if ch == '"': in_string = True; i+=1; continue
+        if ch == '\'': in_char = True; i+=1; continue
+        if ch == '/' and i+1 < L:
+            if text[i+1] == '/': in_line_comment = True; i+=2; continue
+            if text[i+1] == '*': in_block_comment = True; i+=2; continue
+            
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return None
 def _extract_first_assert(s: str) -> Optional[str]:
-    # 从后往前扫描，按括号计数提取最后一个 assert 语句
-    matches = list(re.finditer(r'(assertTrue|assert|assertEquals|assertNotNull|assertFalse|assertSame|assertNotSame)\s*\(', s))
+    # 从后往前扫描，提取最后一个有效的断言语句
+    # 使用 get_disabled_intervals 跳过注释和字符串中的伪断言
+    matches = list(re.finditer(r'((?:[\w\.]+\.)?(?:assertTrue|assert|assertEquals|assertNotNull|assertFalse|assertSame|assertNotSame|assertArrayEquals|assertNotEquals|assertThrows|assertThat|fail))\s*\(', s))
     if not matches:
         return None
     
+    # 获取需要跳过的区间（注释、字符串）
+    disabled = get_disabled_intervals(s)
+
     # 从最后一个匹配开始处理
     for m in reversed(matches):
         start = m.start()
-        i = m.end() - 1
-        depth = 0
-        in_s = in_c = False
-        L = len(s)
-        while i < L:
-            ch = s[i]
-            if in_s:
-                if ch == '\\':
-                    i += 2; continue
-                if ch == '"':
-                    in_s = False
-                i += 1; continue
-            if in_c:
-                if ch == '\\':
-                    i += 2; continue
-                if ch == '\'':
-                    in_c = False
-                i += 1; continue
-            if ch == '"':
-                in_s = True; i += 1; continue
-            if ch == '\'':
-                in_c = True; i += 1; continue
-            if ch == '(':
-                depth += 1
-            elif ch == ')':
-                depth -= 1
-                if depth == 0:
-                    end = i + 1
-                    if end < L and s[end] == ';':
-                        end += 1
-                    return s[start:end].strip()
-            i += 1
+        
+        # 检查是否在禁用区间内
+        is_disabled = False
+        for (d_start, d_end) in disabled:
+            if d_start <= start < d_end:
+                is_disabled = True
+                break
+        if is_disabled:
+            continue
+            
+        # 使用智能括号匹配找到结尾
+        paren_open = m.end() - 1
+        end_idx = find_matching_paren_smart(s, paren_open)
+        
+        if end_idx is not None:
+            # 检查分号
+            if end_idx < len(s) and s[end_idx] == ';':
+                end_idx += 1
+            return s[start:end_idx].strip()
+            
     return None
-
 def strip_java_guard(s: str) -> str:
     s = s or ""
-    # 移除 <think>...</think> 标签及其内容 (处理 R1 模型的思考过程)
-    # 使用 re.DOTALL 确保 . 匹配换行符
-    s = re.sub(r'<think>.*?</think>', '', s, flags=re.DOTALL)
-    
-    s = re.sub(r'```(?:\w+)?\s*', '', s)
-    s = re.sub(r'\s*```', '', s)
 
+    # 0) 处理异常捕获代码块 (Priority 1: try-catch blocks)
+    # 针对 Java 异常测试，模型通常输出 try { ... } catch { ... }
+    # 此模式比单条断言更能代表模型意图
+    try_catch_match = re.search(r'try\s*\{.*?\}\s*catch\s*\(.*?\)\s*\{.*?\}', s, re.DOTALL)
+    if try_catch_match:
+        # 清理异常块中的格式化标签
+        result = try_catch_match.group(0)
+        result = re.sub(r'```(?:\w+)?\s*', '', result)
+        result = re.sub(r'\s*```', '', result)
+        return result.strip()
+
+    def _normalize_assertion(a: str) -> str:
+        # strip wrapping code/think tags and whitespace
+        a = a or ""
+        a = re.sub(r'<think>.*?</think>', '', a, flags=re.DOTALL)
+        a = re.sub(r'```(?:\w+)?\s*', '', a)
+        a = re.sub(r'\s*```', '', a)
+        a = a.strip()
+        # remove any leftover HTML tags accidentally captured
+        a = re.sub(r'<[^>]+>', '', a)
+
+        # normalize common function name typos
+        a = re.sub(r'\bassertEqual\b', 'assertEquals', a)
+
+        # ensure it ends with a semicolon
+        if not a.endswith(';'):
+            a = a + ';'
+
+        # if assertEquals with two numeric args and no delta, add small delta for floats
+        m = re.match(r'^(?:[\w\.]+\.)?assertEquals\s*\((.*)\)\s*;?$', a)
+        if m:
+            inside = m.group(1)
+            # split args by top-level commas (rough): if there are already 3 args, keep as is
+            parts = []
+            depth = 0
+            cur = ''
+            for ch in inside:
+                if ch == '(':
+                    depth += 1
+                elif ch == ')':
+                    depth -= 1
+                if ch == ',' and depth == 0:
+                    parts.append(cur.strip())
+                    cur = ''
+                else:
+                    cur += ch
+            if cur.strip():
+                parts.append(cur.strip())
+
+            if len(parts) == 2:
+                # determine if expected looks like float (has '.' or endswith f/F)
+                exp = parts[0]
+                if re.search(r'[0-9]\.[0-9]|[0-9]f\b|[0-9]F\b', exp):
+                    # add delta of 1e-6
+                    a = re.sub(r'\)\s*;?$', ', 1e-6);', a)
+        return a
+
+    # 1) 尝试直接在原始文本中提取第一个完整断言（包含 <think> 内的情况）
     first = _extract_first_assert(s)
     if first:
-        return first
+        return _normalize_assertion(first)
 
-    # 回退：取最后一个 assert（无需复杂括号匹配）
+    # 2) 清理模型思考块和三引号代码块后再试一次
+    cleaned = re.sub(r'<think>.*?</think>', '', s, flags=re.DOTALL)
+    cleaned = re.sub(r'```(?:\w+)?\s*', '', cleaned)
+    cleaned = re.sub(r'\s*```', '', cleaned)
+
+    first2 = _extract_first_assert(cleaned)
+    if first2:
+        return _normalize_assertion(first2)
+
+    # 3) 回退：从原始文本从后往前查找最后一个简单断言（以捕获被包在 think 中的断言）
     last = None
-    for m in re.finditer(r'(assertTrue|assert|assertEquals|assertNotNull|assertFalse|assertSame|assertNotSame)\s*\([^)]*\);?', s, re.DOTALL):
+    # 支持命名空间前缀并扩展断言列表
+    pattern = r'((?:[\w\.]+\.)?(?:assertTrue|assert|assertEquals|assertNotNull|assertFalse|assertSame|assertNotSame|assertArrayEquals|assertNotEquals|assertThrows|assertThat|fail))\s*\([^)]*\);?'
+    for m in re.finditer(pattern, s, re.DOTALL):
         last = m.group(0).strip()
+    # 如果原始文本没有找到，再在清理后的文本里查一次
+    if not last:
+        for m in re.finditer(pattern, cleaned, re.DOTALL):
+            last = m.group(0).strip()
+
     if last:
-        if not last.endswith(';'):
-            last += ';'
-        return last
-    return s
+        return _normalize_assertion(last)
+
+    return cleaned
 def is_relevant_to_prefix(bug_type: str, prefix: str, assertion: str) -> bool:
     """
     根据测试前缀(prefix)和断言(assertion)筛选变异体。

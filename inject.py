@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import javalang
 import copy
 import types
@@ -2946,7 +2947,7 @@ class BugInject:
                         continue
                     # allow unwrap only when it meaningfully exposes deref risk:
                     # - then contains deref, or method elsewhere derefs var AFTER this if, or used-after heuristic
-                    allow_unwrap = deref_then or (deref_anywhere and used_after) or used_after or deref_else or True
+                    allow_unwrap = deref_then or (deref_anywhere and used_after) or used_after or deref_else
                     if not allow_unwrap:
                         continue
 
@@ -2981,7 +2982,7 @@ class BugInject:
                         # removal would skip the then which may have return/throw - unsafe
                         continue
                     # allow removal if else or later code dereferences var or used-after heuristic
-                    allow_remove = deref_else or (deref_anywhere and used_after) or used_after or True
+                    allow_remove = deref_else or (deref_anywhere and used_after) or used_after
                     # additional relaxed condition: if else uses var and does not early-exit, allow
                     if not allow_remove and else_stmt is not None:
                         try:
@@ -3177,6 +3178,34 @@ class BugInject:
                     "code": unparse(copy_method)
                 })
                 vid += 1
+        # [补全遗漏] 5. Objects.isNull / Objects.nonNull 判定翻转
+        all_mis_null = list(target_method_node.filter(_jtree.MethodInvocation))
+        for idx, (path, mi) in enumerate(all_mis_null):
+            if getattr(mi, "qualifier", None) != "Objects":
+                continue
+            member = getattr(mi, "member", None)
+            if member not in ("isNull", "nonNull"):
+                continue
+            copy_method = copy.deepcopy(target_method_node)
+            try:
+                copy_mis = list(copy_method.filter(_jtree.MethodInvocation))
+                if idx < len(copy_mis):
+                    _, mi2 = copy_mis[idx]
+                    if getattr(mi2, "qualifier", None) == "Objects":
+                        old_member = getattr(mi2, "member", None)
+                        if old_member in ("isNull", "nonNull"):
+                            mi2.member = "nonNull" if old_member == "isNull" else "isNull"
+                            result.append({
+                                "bug_id": vid,
+                                "bug_type": "Null Reference Failures",
+                                "mutation": "flip_objects_null_predicate",
+                                "origin_call": old_member,
+                                "new_call": mi2.member,
+                                "code": unparse(copy_method)
+                            })
+                            vid += 1
+            except Exception:
+                pass
         # # also keep existing qualifier-to-null method-invocation mutations (unchanged)
         # all_mis = list(target_method_node.filter(_jtree.MethodInvocation))
         # for idx, (path, mi) in enumerate(all_mis):
@@ -3512,6 +3541,30 @@ class BugInject:
                                     })
                                     id += 1
                     except Exception: pass
+
+        # [补全遗漏] 2d) indexOf / lastIndexOf 方向互换（边界相关检索偏差）
+        all_idx_calls = list(target_method_node.filter(_jtree.MethodInvocation))
+        for idx, (path, mi) in enumerate(all_idx_calls):
+            member = getattr(mi, "member", None)
+            if member not in ("indexOf", "lastIndexOf"):
+                continue
+            copy_method = copy.deepcopy(target_method_node)
+            try:
+                copy_calls = list(copy_method.filter(_jtree.MethodInvocation))
+                if idx < len(copy_calls):
+                    _, mi2 = copy_calls[idx]
+                    mi2.member = "lastIndexOf" if member == "indexOf" else "indexOf"
+                    result.append({
+                        "bug_id": id,
+                        "bug_type": "Index Boundary Failures",
+                        "mutation": "swap_index_search_direction",
+                        "origin_call": member,
+                        "new_call": mi2.member,
+                        "code": unparse(copy_method)
+                    })
+                    id += 1
+            except Exception:
+                pass
         return result
     def resouceinject(target_method_node):
         # 植入bug 3： Resource Management Failures 资源未正确关闭，缺少 try-finally
@@ -3627,6 +3680,36 @@ class BugInject:
                             })
                              id += 1
             except Exception: pass
+
+        # [补全遗漏] 2b) 删除 flush/commit 生命周期调用
+        life_calls = {"flush", "commit"}
+        life_indices = [i for i, (p, m) in enumerate(all_mis) if getattr(m, "member", None) in life_calls]
+        for original_idx in life_indices:
+            copy_method = copy.deepcopy(target_method_node)
+            try:
+                copy_mis = list(copy_method.filter(_jtree.MethodInvocation))
+                if original_idx < len(copy_mis):
+                    path2, mi2 = copy_mis[original_idx]
+                    member = getattr(mi2, "member", None)
+                    parent = None
+                    if len(path2) >= 1:
+                        for anc in reversed(path2[:-1]):
+                            if hasattr(anc, "statements") or hasattr(anc, "statement"):
+                                parent = anc
+                                break
+                    if parent is None and len(path2) >= 2:
+                        parent = path2[-2]
+                    if parent and _remove_node_from_parent(mi2, parent):
+                        result.append({
+                            "bug_id": id,
+                            "bug_type": "Resource Management Failures",
+                            "mutation": "remove_lifecycle_call",
+                            "removed_call": member,
+                            "code": unparse(copy_method)
+                        })
+                        id += 1
+            except Exception:
+                pass
 
         # 3) 吞掉 catch 块内容 & 泛化异常
         # Use javalang.tree.CatchClause explicitly if _jtree is avail
@@ -4266,7 +4349,32 @@ class BugInject:
                     pass
                 if applied:
                     break
-        
+
+        # [补全遗漏] 5) wait(timeout) -> wait()，移除超时保护
+        all_wait_calls = list(target_method_node.filter(_jtree.MethodInvocation))
+        for idx, (path, mi) in enumerate(all_wait_calls):
+            if getattr(mi, "member", None) != "wait":
+                continue
+            args = getattr(mi, "arguments", []) or []
+            if len(args) == 0:
+                continue
+            copy_method = copy.deepcopy(target_method_node)
+            try:
+                copy_mis = list(copy_method.filter(_jtree.MethodInvocation))
+                if idx < len(copy_mis):
+                    _, mi2 = copy_mis[idx]
+                    if getattr(mi2, "member", None) == "wait" and (getattr(mi2, "arguments", []) or []):
+                        mi2.arguments = []
+                        result.append({
+                            "bug_id": id,
+                            "bug_type": "Concurrent Modification Failures",
+                            "mutation": "remove_wait_timeout",
+                            "code": unparse(copy_method)
+                        })
+                        id += 1
+            except Exception:
+                pass
+
         return result
     def incorrectinject(target_method_node):
         # 植入bug 5： Incorrect Behavior Failures（在“结果计算”中变异逻辑/比较/位运算符，导致返回/赋值错误）
@@ -4529,6 +4637,42 @@ class BugInject:
                             break
                     except Exception:
                         continue
+
+        # [补全遗漏] 追加少量算术替代候选，避免单一映射过窄
+        arith_extra = {"+": ["*"], "-": ["/"], "*": ["+"], "/": ["-"]}
+        for idx, (path, node) in enumerate(all_bins):
+            origin = getattr(node, "operator", None)
+            if origin not in arith_extra:
+                continue
+            try:
+                if not _is_in_result_computation(path, node):
+                    continue
+            except Exception:
+                continue
+            left_op = getattr(node, "operandl", None) or getattr(node, "left", None)
+            right_op = getattr(node, "operandr", None) or getattr(node, "right", None)
+            if _is_string_literal(left_op) or _is_string_literal(right_op):
+                continue
+            for temp in arith_extra[origin]:
+                copy_method = copy.deepcopy(target_method_node)
+                try:
+                    copy_bins = list(copy_method.filter(BinaryOperation))
+                    if idx < len(copy_bins):
+                        _, b2 = copy_bins[idx]
+                        if getattr(b2, "operator", None) == origin:
+                            b2.operator = temp
+                            result.append({
+                                "bug_id": id,
+                                "bug_type": "Incorrect Behavior Failures",
+                                "mutation": "operator_mutation_in_result_extra",
+                                "origin_operator": origin,
+                                "new_operator": temp,
+                                "location": "result_computation",
+                                "code": unparse(copy_method)
+                            })
+                            id += 1
+                except Exception:
+                    pass
 
         # 对赋值操作符进行变异 (e.g. += -> -=)
         all_assigns = list(target_method_node.filter(_jtree.Assignment))
@@ -5022,6 +5166,37 @@ class BugInject:
                         })
                         id += 1
 
+        # [补全遗漏] 三元表达式条件翻转：cond ? a : b -> !cond ? a : b
+        all_nodes_logic = list(target_method_node.filter(lambda n: True))
+        ternary_indices = []
+        for idx, (path, node) in enumerate(all_nodes_logic):
+            if type(node).__name__ in ("TernaryExpression", "ConditionalExpression") and getattr(node, "condition", None) is not None:
+                ternary_indices.append(idx)
+        for t_idx in ternary_indices:
+            copy_method = copy.deepcopy(target_method_node)
+            copy_iter = list(copy_method.filter(lambda n: True))
+            if t_idx >= len(copy_iter):
+                continue
+            _, n2 = copy_iter[t_idx]
+            cond2 = getattr(n2, "condition", None)
+            if cond2 is None:
+                continue
+            try:
+                if not hasattr(cond2, "prefix_operators"):
+                    setattr(cond2, "prefix_operators", [])
+                if cond2.prefix_operators is None:
+                    cond2.prefix_operators = []
+                cond2.prefix_operators.insert(0, "!")
+                result.append({
+                    "bug_id": id,
+                    "bug_type": "Logic Assertion Failures",
+                    "mutation": "flip_ternary_condition",
+                    "code": unparse(copy_method)
+                })
+                id += 1
+            except Exception:
+                pass
+
         return result                    
             # if node.operator == '==' or node.operator == '!=':
             #     origin = node.operator
@@ -5189,46 +5364,87 @@ class BugInject:
                 })
                 id += 1
 
+        # [补全遗漏] 3) 将 size()/length() > 0 或 >= 1 的守卫去掉，补足正向空检查遗漏
+        def _is_positive_size_guard(node):
+            if node is None or type(node).__name__ != "BinaryOperation":
+                return (False, None)
+            op = getattr(node, "operator", None)
+            left = getattr(node, "operandl", None)
+            right = getattr(node, "operandr", None)
+            try:
+                if op in (">", ">=") and _is_numeric_literal(right) and str(getattr(right, "value", "")).strip() in ("0", "1"):
+                    if type(left).__name__ in ("MethodInvocation", "MemberReference") and getattr(left, "member", None) in ("size", "length"):
+                        return (True, unparse(node))
+                if op in ("<", "<=") and _is_numeric_literal(left) and str(getattr(left, "value", "")).strip() in ("0", "1"):
+                    if type(right).__name__ in ("MethodInvocation", "MemberReference") and getattr(right, "member", None) in ("size", "length"):
+                        return (True, unparse(node))
+            except Exception:
+                pass
+            return (False, None)
+
+        for idx, (path, if_node) in enumerate(all_ifs):
+            cond = getattr(if_node, "condition", None)
+            ok, cond_s = _is_positive_size_guard(cond)
+            if not ok:
+                continue
+            copy_method = copy.deepcopy(target_method_node)
+            try:
+                copy_ifs = list(copy_method.filter(IfStatement))
+                if idx < len(copy_ifs):
+                    path2, if_node2 = copy_ifs[idx]
+                    parent = None
+                    for anc in reversed(path2[:-1]):
+                        if hasattr(anc, "statements") or hasattr(anc, "statement"):
+                            parent = anc
+                            break
+                    if parent is None:
+                        parent = path2[-2] if len(path2) >= 2 else None
+                    if parent and _unwrap_if_statement_in_parent(if_node2, parent):
+                        result.append({
+                            "bug_id": id,
+                            "bug_type": "Data Integrity Failures",
+                            "mutation": "remove_positive_size_guard",
+                            "removed_condition": cond_s,
+                            "code": unparse(copy_method)
+                        })
+                        id += 1
+            except Exception:
+                pass
+
         # 3) 把数值字面量改为 0 或 负值（例如把 len -> 0 或 -len），可能导致边界/逻辑错误
-        # for path, lit in target_method_node.filter(Literal):
-        #     try:
-        #         val = getattr(lit, "value", None)
-        #         if val is None:
-        #             continue
-        #         vs = str(val).strip()
-        #     except Exception:
-        #         continue
-        #     if re.match(r"^-?\d+(\.\d+)?[lLfFdD]?$", vs):
-        #         # two mutations: to 0, and to negative version (if not already negative)
-        #         for new_val, mut_name in (("0", "literal_to_zero"), (("-" + vs.lstrip("-")), "literal_to_negative")):
-        #             # skip if already same
-        #             if vs == new_val:
-        #                 continue
-        #             if vs == "0" or vs == "0.0":
-        #                 continue
-        #             copy_method = copy.deepcopy(target_method_node)
-        #             changed = False
-        #             for p2, lit2 in copy_method.filter(Literal):
-        #                 try:
-        #                     if getattr(lit2, "value", None) is None:
-        #                         continue
-        #                     if str(getattr(lit2, "value", None)).strip() == vs:
-        #                         lit2.value = new_val
-        #                         changed = True
-        #                         # only change first matching literal instance per variant
-        #                         break
-        #                 except Exception:
-        #                     continue
-        #             if changed:
-        #                 result.append({
-        #                     "bug_id": id,
-        #                     "bug_type": "Data Integrity Failures",
-        #                     "mutation": mut_name,
-        #                     "original_literal": vs,
-        #                     "new_literal": new_val,
-        #                     "code": unparse(copy_method)
-        #                 })
-        #                 id += 1
+        # [补全遗漏] 恢复一小部分数值字面量变异，补足原先注释掉的整数边界算子
+        for idx, (path, lit) in enumerate(target_method_node.filter(Literal)):
+            try:
+                val = getattr(lit, "value", None)
+                if val is None:
+                    continue
+                vs = str(val).strip()
+            except Exception:
+                continue
+            if not re.match(r"^-?\d+[lL]?$", vs):
+                continue
+            for new_val, mut_name in (("0", "literal_to_zero"), ("-1", "literal_to_negative_one"), ("Integer.MAX_VALUE", "literal_to_int_max"), ("Integer.MIN_VALUE", "literal_to_int_min")):
+                if vs == new_val:
+                    continue
+                copy_method = copy.deepcopy(target_method_node)
+                try:
+                    copy_lits = list(copy_method.filter(Literal))
+                    if idx < len(copy_lits):
+                        _, lit2 = copy_lits[idx]
+                        if str(getattr(lit2, "value", None)).strip() != vs:
+                            continue
+                        lit2.value = new_val
+                        result.append({
+                            "bug_id": id,
+                            "bug_type": "Data Integrity Failures",
+                            "mutation": mut_name,
+                            "original_literal": vs,
+                            "new_literal": new_val,
+                            "code": unparse(copy_method)
+                        })
+                        id += 1
+                except Exception:
+                    pass
 
         # 4) 移除 isEmpty()/size()==0 等空/空集合检查 -> 展开 then-block（使空值/空集合未被校验）
         def _is_isEmpty_or_size_zero(node):
@@ -5310,71 +5526,71 @@ class BugInject:
 
         # 1) 把整数字面量改为 Integer.MAX_VALUE / Integer.MIN_VALUE（可能导致溢出）
         # 改用 idx 定位
-        # all_lits_1 = list(target_method_node.filter(Literal))
-        # for idx, (path, lit) in enumerate(all_lits_1):
-        #     try:
-        #         v = getattr(lit, "value", None)
-        #         if v is None:
-        #             continue
-        #         vs = str(v).strip()
-        #     except Exception:
-        #         continue
-        #     if _is_int_literal_str(vs):
-        #         for new_val, mut_name in (("Integer.MAX_VALUE", "literal_to_int_max"), ("Integer.MIN_VALUE", "literal_to_int_min")):
-        #             if vs == new_val:
-        #                 continue
-        #             copy_method = copy.deepcopy(target_method_node)
-        #             try:
-        #                 copy_lits = list(copy_method.filter(Literal))
-        #                 if idx < len(copy_lits):
-        #                     path2, lit2 = copy_lits[idx]
-        #                     lit2.value = new_val
+        all_lits_1 = list(target_method_node.filter(Literal))
+        for idx, (path, lit) in enumerate(all_lits_1):
+            try:
+                v = getattr(lit, "value", None)
+                if v is None:
+                    continue
+                vs = str(v).strip()
+            except Exception:
+                continue
+            if _is_int_literal_str(vs):
+                for new_val, mut_name in (("Integer.MAX_VALUE", "literal_to_int_max"), ("Integer.MIN_VALUE", "literal_to_int_min")):
+                    if vs == new_val:
+                        continue
+                    copy_method = copy.deepcopy(target_method_node)
+                    try:
+                        copy_lits = list(copy_method.filter(Literal))
+                        if idx < len(copy_lits):
+                            path2, lit2 = copy_lits[idx]
+                            lit2.value = new_val
                             
-        #                     result.append({
-        #                         "bug_id": id,
-        #                         "bug_type": "Numeric Computation Failures",
-        #                         "mutation": mut_name,
-        #                         "original_literal": vs,
-        #                         "new_literal": new_val,
-        #                         "code": unparse(copy_method)
-        #                     })
-        #                     id += 1
-        #             except Exception: pass
+                            result.append({
+                                "bug_id": id,
+                                "bug_type": "Numeric Computation Failures",
+                                "mutation": mut_name,
+                                "original_literal": vs,
+                                "new_literal": new_val,
+                                "code": unparse(copy_method)
+                            })
+                            id += 1
+                    except Exception: pass
 
         # 2) 对整数算术运算（+ - *）的右操作数替换为 Integer.MAX_VALUE，诱发溢出
         # 改用 idx 定位
-        # all_bins = list(target_method_node.filter(BinaryOperation))
-        # for idx, (path, binop) in enumerate(all_bins):
-        #     op = getattr(binop, "operator", None)
-        #     if op not in ("+", "-", "*"):
-        #         continue
-        #     try:
-        #         right_s = unparse(getattr(binop, "operandr", None) or getattr(binop, "right", None))
-        #     except Exception:
-        #         right_s = None
-        #     copy_method = copy.deepcopy(target_method_node)
-        #     try:
-        #         copy_bins = list(copy_method.filter(BinaryOperation))
-        #         if idx < len(copy_bins):
-        #             path2, b2 = copy_bins[idx]
+        all_bins = list(target_method_node.filter(BinaryOperation))
+        for idx, (path, binop) in enumerate(all_bins):
+            op = getattr(binop, "operator", None)
+            if op not in ("+", "-", "*"):
+                continue
+            try:
+                right_s = unparse(getattr(binop, "operandr", None) or getattr(binop, "right", None))
+            except Exception:
+                right_s = None
+            copy_method = copy.deepcopy(target_method_node)
+            try:
+                copy_bins = list(copy_method.filter(BinaryOperation))
+                if idx < len(copy_bins):
+                    path2, b2 = copy_bins[idx]
                     
-        #             # replace right operand with Integer.MAX_VALUE
-        #             z = Literal(value="Integer.MAX_VALUE")
-        #             if hasattr(b2, "operandr"):
-        #                 b2.operandr = z
-        #             elif hasattr(b2, "right"):
-        #                 b2.right = z
+                    # replace right operand with Integer.MAX_VALUE
+                    z = Literal(value="Integer.MAX_VALUE")
+                    if hasattr(b2, "operandr"):
+                        b2.operandr = z
+                    elif hasattr(b2, "right"):
+                        b2.right = z
                     
-        #             result.append({
-        #                 "bug_id": id,
-        #                 "bug_type": "Numeric Computation Failures",
-        #                 "mutation": "arith_rhs_to_int_max",
-        #                 "operator": op,
-        #                 "original_rhs": right_s,
-        #                 "code": unparse(copy_method)
-        #             })
-        #             id += 1
-        #     except Exception: pass
+                    result.append({
+                        "bug_id": id,
+                        "bug_type": "Numeric Computation Failures",
+                        "mutation": "arith_rhs_to_int_max",
+                        "operator": op,
+                        "original_rhs": right_s,
+                        "code": unparse(copy_method)
+                    })
+                    id += 1
+            except Exception: pass
 
         # 3) 浮点字面量替换为极大/极小 double（可能导致溢出/下溢或精度问题）
         # 改用 idx 定位
@@ -5475,6 +5691,22 @@ class BugInject:
         print("正在植入 Bug: String Processing Failures")
         result = []
         id = 0
+
+        def _build_expr_from_source(expr_src):
+            """
+            Parse a standalone Java expression by embedding it into a tiny method body
+            and return the initializer node. This keeps replacements as proper AST
+            expressions instead of stuffing source code into Literal nodes.
+            """
+            try:
+                probe = "class __Tmp__ { void __m__() { Object __x__ = " + expr_src + "; } }"
+                tree = javalang.parse.parse(probe)
+                for _, node in tree.filter(VariableDeclarator):
+                    if getattr(node, "name", None) == "__x__":
+                        return getattr(node, "initializer", None)
+            except Exception:
+                return None
+            return None
 
         # 通用替换辅助函数: 在 AST 父节点中将 old_node 替换为 new_node
         def _do_replace(parent, old_node, new_node):
@@ -5593,9 +5825,8 @@ class BugInject:
                     if parent and q2:
                         # 构造 new String[]{ str }
                         try:
-                            lit_val = f"new String[]{{ {unparse(q2)} }}"
-                            lit_node = Literal(value=lit_val)
-                            if _do_replace(parent, mi2, lit_node):
+                            replacement_expr = _build_expr_from_source(f"new String[]{{ {unparse(q2)} }}")
+                            if replacement_expr is not None and _do_replace(parent, mi2, replacement_expr):
                                 result.append({
                                     "bug_id": id, "bug_type": "String Processing Failures",
                                     "mutation": "remove_split_call",
@@ -5677,6 +5908,20 @@ class BugInject:
                             "code": unparse(copy_method)
                         })
                         id += 1
+
+            # [补全遗漏] startsWith <-> endsWith，补足常见前后缀判断错误
+            if member in ("startsWith", "endsWith") and len(args) >= 1:
+                copy_method = copy.deepcopy(target_method_node)
+                current_mis = list(copy_method.filter(_jtree.MethodInvocation))
+                if idx < len(current_mis):
+                    path2, mi2 = current_mis[idx]
+                    mi2.member = "endsWith" if member == "startsWith" else "startsWith"
+                    result.append({
+                        "bug_id": id, "bug_type": "String Processing Failures",
+                        "mutation": "swap_startswith_endswith",
+                        "code": unparse(copy_method)
+                    })
+                    id += 1
             
             # 1.9 getBytes Encoding Mutation
             if member == "getBytes" and len(args) == 1 and isinstance(args[0], Literal):
@@ -5784,6 +6029,9 @@ class BugInject:
                  # 数组类型：难以确定具体 Component Type，暂不自动生成 new T[0] 以免语法错误，
                  # 除非能精确解析。null 已经包含在上方。
                  pass
+            # [补全遗漏] 常见包装类型也给出数值型候选
+            if ret_type_s in ("Integer", "Long", "Short", "Byte"):
+                candidates.extend(["0", "-1", "1"])
 
         if not candidates:
             return result
@@ -5860,17 +6108,19 @@ class BugInject:
                    BugInject.stringinject(target_method_node) + \
                    BugInject.returninject(target_method_node)
                    
-        # 去重逻辑：基于 'code' 字段和 'bug_type' 去重
+        # 去重逻辑：保留相同代码但不同 family / 算子的元数据，避免简单按 code 去重
         unique_bugs = []
-        seen_codes = set()
+        seen_bugs = set()
         
         for bug in all_bugs:
-            # 使用 (code, bug_type) 元组作为唯一标识，也可以仅用 code
-            # 这里为了保险，防止不同类型但代码碰巧相同的误判（虽然极少），采用了简单去重
-            # 实际上仅仅去重 code 应该就足够了，因为如果 code 一样，行为就一样
             code_content = bug.get('code', '').strip()
-            if code_content and code_content not in seen_codes:
-                seen_codes.add(code_content)
+            bug_key = (
+                code_content,
+                bug.get('bug_type', ''),
+                bug.get('mutation', '')
+            )
+            if code_content and bug_key not in seen_bugs:
+                seen_bugs.add(bug_key)
                 unique_bugs.append(bug)
                 
         return unique_bugs
